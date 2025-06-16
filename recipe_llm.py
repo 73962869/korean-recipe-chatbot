@@ -1,5 +1,7 @@
 import os
+import json
 from dotenv import load_dotenv
+
 from langchain.chains import create_history_aware_retriever, create_retrieval_chain
 from langchain.chains.combine_documents import create_stuff_documents_chain
 from langchain_community.chat_message_histories import ChatMessageHistory
@@ -10,9 +12,7 @@ from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain.vectorstores import FAISS
 
 
-load_dotenv()
-
-
+# 🍳 [요리 예시 few-shot] ===================================================
 answer_examples = [
     {
         "input": "계란과 김치로 만들 수 있는 요리는?",
@@ -24,7 +24,8 @@ answer_examples = [
     }
 ]
 
-# 세션 히스토리 저장소
+# [환경 설정]
+load_dotenv()
 store = {}
 
 def get_session_history(session_id: str) -> BaseChatMessageHistory:
@@ -32,17 +33,15 @@ def get_session_history(session_id: str) -> BaseChatMessageHistory:
         store[session_id] = ChatMessageHistory()
     return store[session_id]
 
-# LLM 불러오기
+# [LLM + 벡터스토어]
 def load_llm(model='gpt-4o'):
     return ChatOpenAI(model=model)
 
-# FAISS 벡터스토어 로딩
 def load_vectorstore():
     embedding = OpenAIEmbeddings()
-    db = FAISS.load_local("recipe_index", embedding, allow_dangerous_deserialization=True)
-    return db
+    return FAISS.load_local("recipe_index", embedding, allow_dangerous_deserialization=True)
 
-# history aware retriever
+# [질문 재구성]
 def build_history_aware_retriever(llm, retriever):
     contextualize_prompt = ChatPromptTemplate.from_messages([
         ("system", "이전 대화 히스토리를 참고하여 독립된 질문으로 바꿔주세요."),
@@ -51,8 +50,8 @@ def build_history_aware_retriever(llm, retriever):
     ])
     return create_history_aware_retriever(llm, retriever, contextualize_prompt)
 
-# few-shot 예시 prompt 생성
-def bulid_few_shot_examples():
+# [few-shot prompt 생성]
+def build_few_shot_examples() -> str:
     example_prompt = PromptTemplate.from_template("질문: {input}\n\n답변: {answer}")
     few_shot_prompt = FewShotPromptTemplate(
         examples=answer_examples,
@@ -63,25 +62,40 @@ def bulid_few_shot_examples():
     )
     return few_shot_prompt.format(input="{input}")
 
-# QA Prompt 구성
+# [dictionary 불러오기]
+def load_dictionary_from_file(path='keyword_dictionary.json'):
+    with open(path, 'r', encoding='utf-8') as file:
+        return json.load(file)
+
+def build_dictionary_text(dictionary: dict) -> str: 
+    return '\n'.join([
+        f'{k} ({", ".join(v["tags"])}): {v["definition"]} [출처: {v["source"]}]'
+        for k, v in dictionary.items()
+    ])
+
+# [QA Prompt 구성]
 def build_qa_prompt():
     system_prompt = (
         "[identity]\n"
-        "- 당신은 한식 요리 추천 전문가이자 50년 한식요리장인입니다.\n"
-        "- 사용자가 가진 재료에 맞춰 요리를 추천하세요.\n"
-        "- 반드시 요리명, 재료, 조리방법 항목으로 나누어 답변하세요.\n"
-        "- 요리 방법은 상세하고 자세히 설명해주세요.\n\n"
-        "[context]\n{context}"
+        "- 당신은 50년 경력의 한식 요리 전문가입니다.\n"
+        "- 사용자가 가진 재료에 맞는 요리를 추천하고 상세하게 설명하세요.\n"
+        "- 요리명, 재료, 조리방법으로 항목을 구분하세요.\n\n"
+        "[context]\n{context}\n\n"
+        "[keyword_dictionary]\n{dictionary_text}"
     )
-    formatted_few_shot = bulid_few_shot_examples()
+
+    dictionary = load_dictionary_from_file()
+    dictionary_text = build_dictionary_text(dictionary)
+    formatted_few_shot = build_few_shot_examples()
+
     return ChatPromptTemplate.from_messages([
         ("system", system_prompt),
         ("assistant", formatted_few_shot),
         MessagesPlaceholder("chat_history"),
         ("human", "{input}")
-    ])
+    ]).partial(dictionary_text=dictionary_text)
 
-# 전체 RAG 체인 구성
+# [전체 체인 구성]
 def build_conversational_chain():
     llm = load_llm()
     db = load_vectorstore()
@@ -99,7 +113,7 @@ def build_conversational_chain():
         output_messages_key="answer"
     ).pick("answer")
 
-
+# [스트리밍 응답 함수
 def stream_ai_message(user_message, session_id='default'):
     qa_chain = build_conversational_chain()
     return qa_chain.stream(
